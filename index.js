@@ -3,22 +3,25 @@ const WebSocket = require("ws");
 const wss = new WebSocket.Server({ port: process.env.PORT || 8080 });
 
 const rooms = new Map();
+const userMap = new Map(); // New data structure to map userId to ws
 
-function addClientToRoom(roomId, ws) {
+function addClientToRoom(roomId, userId, ws) {
   if (!rooms.has(roomId)) {
     rooms.set(roomId, new Set());
   }
-  rooms.get(roomId).add(ws);
+  rooms.get(roomId).add(userId);
+  userMap.set(userId, ws); // Map userId to ws
 }
 
-function removeFromRoom(roomId, ws) {
+function removeFromRoom(roomId, userId) {
   const room = rooms.get(roomId);
   if (room) {
-    room.delete(ws);
+    room.delete(userId);
     if (room.size === 0) {
       rooms.delete(roomId);
     }
   }
+  userMap.delete(userId); // Remove the user from the userMap
 }
 
 function getClientsInRoom(roomId) {
@@ -30,18 +33,21 @@ const connections = new Set();
 wss.on("connection", (ws) => {
   console.log("New client connected.");
 
+  let userId; // Variable to store the userId
+
   ws.on("message", (message) => {
     try {
       const parsedMessage = JSON.parse(message);
-
+      console.log(parsedMessage);
       if (parsedMessage.command === "createRoom") {
         const roomId = parsedMessage.roomId;
+        userId = parsedMessage.userId; // Store the userId from the client
         if (!rooms.has(roomId)) {
-          addClientToRoom(roomId, ws);
+          addClientToRoom(roomId, userId, ws); // Pass userId to addClientToRoom
           console.log(`Client joined room: ${roomId}`);
           notifyRoomUpdate(roomId, rooms.get(roomId));
         } else {
-          addClientToRoom(roomId, ws);
+          addClientToRoom(roomId, userId, ws); // Pass userId to addClientToRoom
           notifyRoomUpdate(roomId, rooms.get(roomId));
           console.log(`Room already exists: ${roomId}`);
           console.log(`Adding client to room: ${roomId}`);
@@ -49,12 +55,14 @@ wss.on("connection", (ws) => {
       } else if (parsedMessage.command === "deleteRoom") {
         const roomId = parsedMessage.roomId;
         if (rooms.has(roomId)) {
-          rooms.delete(roomId);
+          removeFromRoom(roomId, userId); // Pass userId to removeFromRoom
           console.log(`Room deleted: ${roomId}`);
           notifyRoomUpdate(roomId, new Set()); // Notify all participants that the room is deleted
         }
       } else {
-        broadcastMessage(parsedMessage, ws);
+        parsedMessage.userId = userId; // Attach the userId to the message
+        const targetUserId = parsedMessage.targetUserId; // Extract the target userId from the message
+        broadcastMessage(parsedMessage, ws, targetUserId);
       }
     } catch (error) {
       console.error("Error parsing incoming message:", error);
@@ -65,8 +73,9 @@ wss.on("connection", (ws) => {
     console.log("Client disconnected.");
     // Remove the connection from all rooms it belongs to
     rooms.forEach((room, roomId) => {
-      if (room.has(ws)) {
-        removeFromRoom(roomId, ws);
+      if (room.has(userId)) {
+        // Use userId to check membership in the room
+        removeFromRoom(roomId, userId); // Pass userId to removeFromRoom
         notifyRoomUpdate(roomId, rooms.get(roomId));
       }
     });
@@ -76,12 +85,19 @@ wss.on("connection", (ws) => {
   });
 });
 
-const broadcastMessage = (message, sender) => {
+const broadcastMessage = (message, sender, targetUserId) => {
   const roomId = message.roomId;
   if (roomId) {
     const clientsInRoom = getClientsInRoom(roomId);
-    clientsInRoom.forEach((ws) => {
-      if (ws !== sender && ws.readyState === WebSocket.OPEN) {
+    clientsInRoom.forEach((userId) => {
+      // Iterate through userIds in the room
+      const ws = userMap.get(userId); // Get the ws using the userId
+      if (
+        (!targetUserId || userId === targetUserId) &&
+        ws !== sender &&
+        ws.readyState === WebSocket.OPEN
+      ) {
+        // Send the message to the target userId's WebSocket connection
         ws.send(JSON.stringify(message));
       }
     });
@@ -97,7 +113,9 @@ const notifyRoomUpdate = (roomId, participants) => {
   });
 
   const clientsInRoom = getClientsInRoom(roomId);
-  clientsInRoom.forEach((ws) => {
+  clientsInRoom.forEach((userId) => {
+    // Iterate through userIds in the room
+    const ws = userMap.get(userId); // Get the ws using the userId
     if (ws.readyState === WebSocket.OPEN) {
       ws.send(updateMessage);
     }
